@@ -7,7 +7,15 @@
 var express = require('express');
 
 const sqlite3 = require('sqlite3').verbose();
-let db = new sqlite3.Database(':memory:');
+// let db = new sqlite3.Database(':memory:');
+let db = new sqlite3.Database('db/users.db', (err) => {
+  if (err) {
+    console.error(err.message);
+  }
+
+  console.log('Connected to the Users database.');
+  createDatabase();
+});
 
 var StellarSdk = require('stellar-sdk');
 var server = new StellarSdk.Server('https://horizon-testnet.stellar.org');
@@ -63,19 +71,33 @@ app.get('/configure-receiver', function(req,res){
 	res.sendStatus(200);
 });
 
-app.get('/vote/:index/:option', function(req, res) {
-	var index = req.params.index;
-	var option  = req.params.option;
-	console.log("Receiving vote["+index+"]="+option);
-	vote(index,option);
-  	res.send(200);
+app.get('/vote/:index/:option', async(req, res, next) => {
+	try{
+		var index = req.params.index;
+		var option  = req.params.option;
+		var response = "Correct";
+		console.log("Receiving vote["+index+"]="+option);
+
+		const account = await server.loadAccount(receiver_account.publicKey());
+		data_attributes = account.data_attr;
+
+		if( !data_attributes.hasOwnProperty( arr_accounts[index].alias ) ){
+			vote(index,option);
+		}else{
+			response = "already-voted";
+		}
+
+	  	res.send(response);
+	}catch(error){
+		console.log("Error voting ["+error+"]");
+	}
 });
 
 app.get('/get-all-accounts', function(req,res){
 	console.log("Getting all accounts");
 	var arr_obj_result = [];
     arr_accounts.forEach(function(element){
-		arr_obj_result.push( {public: element.publicKey() , private : element.secret()} );
+		arr_obj_result.push( {public: element.publicKey() , private : element.secret(), alias : element.alias } );
 	});
 	var obj_result = {
 		issuer : {public: issuer_account.publicKey() , private : issuer_account.secret() },
@@ -112,16 +134,19 @@ const TOKEN_B = "MXNB";
 
 function createPairIssuerAccount(){
 	issuer_account = StellarSdk.Keypair.random();
+	insertDatabase(0,issuer_account.secret(),'issuer','issuer');
 }
 
 function createPairReseiverAccount(){
 	receiver_account = StellarSdk.Keypair.random();
+	insertDatabase(1,receiver_account.secret(),'receiver','receiver');
 }
 
 function createPairKeys(numberOfAccounts){
 	for(var i=0;i<numberOfAccounts;i++){
 		arr_accounts.push(StellarSdk.Keypair.random());
 		arr_accounts[i].alias = crypto.createHash('sha256').update(Date.now()+arr_accounts[i].publicKey()).digest('base64');
+		insertDatabase(i+2,arr_accounts[i].secret(),arr_accounts[i].alias,'normal');
 		 console.log( crypto.createHash('sha256').update(Date.now()+arr_accounts[i].publicKey()).digest('base64') );
 	}
 }
@@ -143,12 +168,10 @@ const verifyBalance  = async function(publicKey){
 	var json_result = [];
 	const account = await server.loadAccount(publicKey);
 	console.log("Balances for account: " + publicKey );
-
 	account.balances.forEach(function(balance) {
 	  console.log("Type:", balance.asset_type, ",Code:", balance.asset_code , ", Balance:", balance.balance);
 	  json_result.push( { type: balance.asset_type , asset_code : balance.asset_code , balance: balance.balance } );
 	});
-
 	return json_result;
 }
 
@@ -176,8 +199,7 @@ function configureReceiver(){
 	var receivingKeys = receiver_account;
 	var issuingKeys = issuer_account;
 
-	TOKEN_MXNA = new StellarSdk.Asset(TOKEN_A, issuingKeys.publicKey());
-    TOKEN_MXNB = new StellarSdk.Asset(TOKEN_B, issuingKeys.publicKey());
+	createAssets();
 
 	server.loadAccount(receivingKeys.publicKey())
 	  .then(function(receiver) {
@@ -331,6 +353,8 @@ function vote(index,option){
 	var voting_account = arr_accounts[index];
 	var chosen_option = ( option == TOKEN_A )?TOKEN_MXNA:TOKEN_MXNB;
 	
+	console.log("Inside vote:");
+	console.log( chosen_option );
 	var receivingKeys = receiver_account;
 
 	server.loadAccount(voting_account.publicKey())
@@ -380,53 +404,96 @@ function vote(index,option){
 	  });
 }
 
-//     ____      _ __  _       __             __
-//    /  _/___  (_) /_(_)___ _/ /  ________  / /___  ______
-//    / // __ \/ / __/ / __ `/ /  / ___/ _ \/ __/ / / / __ \
-//  _/ // / / / / /_/ / /_/ / /  (__  )  __/ /_/ /_/ / /_/ /
-// /___/_/ /_/_/\__/_/\__,_/_/  /____/\___/\__/\__,_/ .___/
-//                                                 /_/
+function queryDatabase(){
+	db.serialize(() => {
+	  db.each(`SELECT * FROM accounts`, (err, row) => {
+	    if (err) {
+	      console.error(err.message);
+	    }
+	    // Add validations to verify accounts and load them
+	    // Add validation to prevent double vote
+	    // https://www.sqlitetutorial.net/sqlite-create-table/
+	    if( row.type == 'issuer' ){
+	    	issuer_account = StellarSdk.Keypair.fromSecret(row.privateKey);
+	    }else if( row.type == 'receiver' ){
+	    	receiver_account = StellarSdk.Keypair.fromSecret(row.privateKey);
+	    }else{
+	    	arr_accounts.push(StellarSdk.Keypair.fromSecret(row.privateKey));
+	    	arr_accounts[arr_accounts.length -1].alias = row.alias;
+	    }
+	    console.log("Selected:"+row.id + "\t" + row.privateKey+ "\t" + row.type);
+	  });
 
-console.log("#Creating issuerAccount#");
-createPairIssuerAccount();
-console.log("#Creating issuer account (Adding funds with Stellar Bot)#");
-console.log(issuer_account.secret());
-console.log(issuer_account.publicKey());
-createAccount( issuer_account.publicKey() );
-console.log("#Creating receiverAccount#");
-createPairReseiverAccount();
-console.log("#Creating receiver account (Adding funds with Stellar Bot)#");
-console.log(receiver_account.secret());
-console.log(receiver_account.publicKey());
-createAccount( receiver_account.publicKey() );
+	  setTimeout(initSystem, 5000);
+	});
+}
 
-console.log("============================================================");
+function insertDatabase(id,privateKey,alias,type){
+	console.log("Insert statement");
+	db.run(`INSERT INTO accounts(id,privateKey,alias,type) VALUES(?,?,?,?)`, [id,privateKey,alias,type], function(err) {
+    if (err) {
+      return console.log("Insert:"+err.message);
+    }
+    // get the last insert id
+    console.log(`A row has been inserted with rowid ${this.lastID}`);
+  });
+}
 
-console.log("#Creating pairs of keys#");
-createPairKeys( NUMBER_OF_ACCOUNTS );
-console.log("#Creating accounts (Adding funds with Stellar Bot)#");
-arr_accounts.forEach(function(element){
-	console.log("Account:");
-	console.log(element.secret());
-	console.log(element.publicKey());
-	createAccount( element.publicKey() );
-});
+function createDatabase(){
+	var query = "CREATE TABLE IF NOT EXISTS accounts (";
+		query += "id INTEGER  PRIMARY KEY,";
+	   	query += "privateKey TEXT  NOT NULL,";
+	   	query += "alias TEXT  NOT NULL,";
+		query += "type TEXT  NOT NULL";
+    query += ");";
 
+	db.run(query);
 
-// http://localhost:2000/configure-receiver
+	setTimeout(queryDatabase, 6000);
+}
 
-// http://localhost:2000/tokens
+function closeDatabase(){
+	db.close((err) => {
+	  if (err) {
+	    console.error(err.message);
+	  }
+	  console.log('Close the database connection.');
+	});
+}
 
-// http://localhost:2000/balances
+function createAssets(){
+    TOKEN_MXNA = new StellarSdk.Asset(TOKEN_A, issuer_account.publicKey());
+    TOKEN_MXNB = new StellarSdk.Asset(TOKEN_B, issuer_account.publicKey());
+}
 
-// http://localhost:2000/vote/0/MXNA
-// http://localhost:2000/vote/1/MXNA
+function initSystem(){
+	if( arr_accounts.length > 0){
+		console.log("Values loaded from Database");
+	 	return;
+    }
+	console.log("#Creating issuerAccount#");
+	createPairIssuerAccount();
+	console.log("#Creating issuer account (Adding funds with Stellar Bot)#");
+	console.log(issuer_account.secret());
+	console.log(issuer_account.publicKey());
+	createAccount( issuer_account.publicKey() );
+	console.log("#Creating receiverAccount#");
+	createPairReseiverAccount();
+	console.log("#Creating receiver account (Adding funds with Stellar Bot)#");
+	console.log(receiver_account.secret());
+	console.log(receiver_account.publicKey());
+	createAccount( receiver_account.publicKey() );
 
-// Create Smart Contract
-// Simulate poll
+	console.log("============================================================");
 
+	console.log("#Creating pairs of keys#");
+	createPairKeys( NUMBER_OF_ACCOUNTS );
+	console.log("#Creating accounts (Adding funds with Stellar Bot)#");
+	arr_accounts.forEach(function(element){
+		console.log("Account:");
+		console.log(element.secret());
+		console.log(element.publicKey());
+		createAccount( element.publicKey() );
+	});
+}
 
-
-// Annotations
-// https://www.stellar.org/developers/guides/issuing-assets.html
-// https://www.sqlitetutorial.net/sqlite-nodejs/

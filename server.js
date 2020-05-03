@@ -399,6 +399,7 @@ function vote(index,option){
 	    return server.submitTransaction(transaction);
 	  })
 	  .then(console.log)
+	  .then( setTimeout(keyRotation, 5000 , index) )
 	  .catch(function(error) {
 	    console.error('Error!', error);
 	  });
@@ -437,6 +438,25 @@ function insertDatabase(id,privateKey,alias,type){
     // get the last insert id
     console.log(`A row has been inserted with rowid ${this.lastID}`);
   });
+}
+
+function keyRotation(index){
+	let newPairOfKeys = StellarSdk.Keypair.random();
+	let id_db = parseInt(index) + 2;
+	console.log("Key rotation:"+id_db);
+	let data = [newPairOfKeys.secret() , id_db];
+	let sql = `UPDATE accounts
+	            SET privateKey = ? 
+	            WHERE id = ?`;
+
+	db.run(sql, data, function(err) {
+	  if (err) {
+	    return console.error(err.message);
+	  }
+	  console.log(`Row(s) updated: ${this.changes}`);
+	  console.log(data);
+	  arr_accounts[index] = newPairOfKeys;
+	});
 }
 
 function createDatabase(){
